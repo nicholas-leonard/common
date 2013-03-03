@@ -2,7 +2,7 @@
 #define _THREADING_H_ 1
 
 /*
- * threading.h
+ * threading.hpp
  * 
  * Copyright 2012 Nicholas Leonard <nick@nikopia.org>
  * 

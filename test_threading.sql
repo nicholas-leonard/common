@@ -1,4 +1,11 @@
-﻿CREATE SCHEMA test;
+﻿/*
+ * test_threadning.sql
+ * 
+ * Copyright 2012 Nicholas Leonard <nick@nikopia.org>
+ * 
+ */
+
+CREATE SCHEMA test;
 
 --DROP TABLE test.process;
 CREATE TABLE test.process (

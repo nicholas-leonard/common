@@ -2,7 +2,7 @@
 #define _UTILS_H_ 1
 
 /*
- * utils.h
+ * utils.hpp
  * 
  * Copyright 2012 Nicholas Leonard <nick@nikopia.org>
  *  

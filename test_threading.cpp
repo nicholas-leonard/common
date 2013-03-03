@@ -1,4 +1,9 @@
-
+/*
+ * test_threadning.cpp
+ * 
+ * Copyright 2012 Nicholas Leonard <nick@nikopia.org>
+ * 
+ */
 #include "threading.hpp"
 
 // A serializable object that will be sent over the wire

@@ -19,7 +19,13 @@ extern "C" {
 extern int PQinitTypes(PGconn *conn);
 extern int PQclearTypes(PGconn *conn);
 }
-
+/*
+ * database.hpp
+ * 
+ * Copyright 2012 Nicholas Leonard <nick@nikopia.org>
+ * 
+ */
+ 
 #include <libpqtypes.h>
 
 
