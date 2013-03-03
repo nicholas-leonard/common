@@ -7,9 +7,11 @@
  * Copyright 2012 Nicholas Leonard <nick@nikopia.org>
  * 
  * Ref. : http://www.hongliangjie.com/2011/09/16/random-number-generation-with-c-0x-in-gcc/
- * Compile with : g++ -std=gnu++0x 
- * 
+ * http://docs.python.org/library/queue.html
+ * http://www.simetric.co.uk/si_time.htm
  * http://en.wikipedia.org/wiki/Actor_model
+ * 
+ * Compile with : g++ -std=gnu++0x 
  */
 
 #include <pthread.h>
@@ -34,9 +36,6 @@
 // http://www.boost.org/doc/libs/1_51_0/libs/serialization/doc/index.html :
 #include <boost/archive/text_oarchive.hpp>
 #include <boost/archive/text_iarchive.hpp>
-// http://www.boost.org/doc/libs/1_51_0/doc/html/boost_asio/reference/ip__tcp/iostream.html ,
-// http://stackoverflow.com/questions/2204458/how-can-i-create-an-ostream-from-a-socket :
-//#include <boost/asio.hpp>
 
 #include <unistd.h>
 #include <sys/types.h>
