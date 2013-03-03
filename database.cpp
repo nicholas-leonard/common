@@ -17,9 +17,7 @@ DatabaseHandle::DatabaseHandle() {
 
 DatabaseHandle::DatabaseHandle(string connection_string) {
 	conn_string = connection_string;
-	//cout << connection_string << endl;
 	conn = PQconnectdb(conn_string.c_str());
-	// cout << (conn == NULL) << endl;
 	if (PQstatus(conn) != CONNECTION_OK) {
 		string error_message = PQerrorMessage(conn);
 		PQfinish(conn);

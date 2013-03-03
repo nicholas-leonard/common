@@ -21,7 +21,7 @@ public :
 		_message(message) {
 	}
 	void print(std::string actor_address) {
-		std::cout << "Print message #" << _message << " from thread #" << actor_address << std::endl;
+		std::cout << "Print message : " << _message << " from actor with address : " << actor_address << std::endl;
 	}
 };
 
@@ -102,7 +102,7 @@ public :
 			} else if (msg->getType() == "Join Now") {
 				delete msg;
 				if (_id.getKey() == 0) {
-					std::cout << "Forward tells prints to join now" << std::endl;
+					std::cout << "Forward tells Print actors to join now" << std::endl;
 					for(it = actor_vector.begin(); it != actor_vector.end(); it++) {
 						ID dest_actor_id("Print", *it);
 						// No data to serialize ...:

@@ -94,6 +94,10 @@ private :
 
 
 class Thread {
+	/* A class that represents a pthread. The code in run() is executed
+	 * in a phtread when start() is called by the parent thread. The 
+	 * pthread is joined when join() is called by a the parent thread. 
+	 * Join() returns when the thread has existed. */
 public:
 	Thread() {};
 	/** Returns true if the thread was successfully started, false if there was an error starting the thread */
@@ -125,6 +129,12 @@ private:
 };
 
 class Message {
+	/* The analog of a packet. It has a header for indicating the source
+	 * and destination of the message. The content of the message is 
+	 * stored in _data. Messages can be sent between processes when 
+	 * _data can be cast into a string and _archive_size is greater than
+	 * 0. Messages are then serialized for transmission and deserialized
+	 * on the receiving end. */
 protected :
 	std::string _message_type;
 	int _message_priority;
@@ -211,6 +221,14 @@ void get_abstimeout(timespec& abstimeout, unsigned long timeout_msec) {
 }
 
 class Queue {
+	/* A Queue that can be used to communicate Messages between threads. 
+	 * It uses a similar interface to the python Queues. Queues have a 
+	 * max length. A muted is used to allow only one message to be 
+	 * put() or get() at any one time, i.e. for thread safe concurrency. 
+	 * put blocks waiting for the not_full_cond condition when the Queue
+	 * is full. Conversely, it get() blocks waiting for the 
+	 * not_empty_cond when the Queue is empty. shutdown() blocks waiting
+	 * for the empty_cond. */
 protected :
 	size_t max_length;
 	pthread_mutex_t mutex;
@@ -383,7 +401,7 @@ struct hashed : public std::unary_function<hash_t, size_t>
 };
 
 class ProcessProxy {
-// Represents a process made up of many workers.
+	/* Represents a process made up of many Actors. */
 public :
 	virtual void send(Message* message, bool block, int timeout);
 	class ProcessProxyException : public std::runtime_error {
@@ -394,6 +412,12 @@ public :
 };
 
 class InterProcessProxy : public ProcessProxy { 
+	/* Used to communicate messages between processes. This is a proxy
+	 * for an external process with ID _process_id. Its _writer_queue
+	 * is used to send messages to a SocketWriter Actor which is 
+	 * responsible for sending the message over a socket to a single 
+	 * other socket managed by a SocketReader Actor in the external 
+	 * process with ID _process_id. */
 protected :
 	Queue* _writer_queue;
 	ID	_process_id;
@@ -410,9 +434,12 @@ public :
 class Connector;
 
 class Actor {
-// Contains a reference to all active queues. 
-// Use this object to communicate with other workers.
-// Communicates connection requests to the Connector.
+	/* An Actor in the sense of the Actor Model. It can establish new 
+	 * connections with other Actors using the Connector. The Connector
+	 * instantiates ProcessProxies for communication with other Actors.
+	 * These other Actors can be in the current process or in external 
+	 * ones. Each Actor has a _get_queue which it uses to get() Messages
+	 * that are addressed to it. */
 protected :
 	// address of this actor :
 	ID _id;
@@ -460,6 +487,7 @@ public :
 };
 
 class ThreadActor : public Actor, public Thread {
+	/* A ThreadActor is an Actor and a Thread. */
 public :
 	ThreadActor(Connector* connector, ID id, Queue* message_queue) :
 		Actor(connector, id, message_queue) {
@@ -468,7 +496,22 @@ public :
 };
 
 class SocketWriter : public ThreadActor {
-// Forwards messages received through its queue to a process.
+	/* A SocketWriter is responsible for forwarding Messages received 
+	 * through its queue to a single external process through a socket.
+	 * A SocketWriter is instantiated by the Connector singleton when 
+	 * Actors of the process request a ProcessProxy for sending messages
+	 * to Actors of an external process. Each process has a maximum of 
+	 * one instance of SocketWriter for each external process it needs 
+	 * to communicate with. This minimizes the amount of sockets.
+	 * For each process-to->process pair, there is a ProcessProxy and 
+	 * a SocketWriter on the client side, and a SocketReader on the 
+	 * server side. These 3 instances are dedicated to this directed 
+	 * communication link. 
+	 * ProcessProxies and SocketWriters share a reference to the same 
+	 * Queue. Actors use the ProcessProxy to put() Messages in the Queue
+	 * which the SocketWriter get()s. This Queue manages the concurrency
+	 * between Actors for the socket. And thus abtrasts away the socket
+	 * into what is essentially a Queue. */
 protected :
 	struct sockaddr_in _server_address;
 	int _socket_fd;
@@ -552,9 +595,21 @@ public :
 class ProcessActor;
 
 class Connector {
-/* Sends socket connection requests on behalf of local workers.
- * These local workers communicate with the socket client through its queue.
- * If the connection was already established, it is returned to the worker. */
+	/* The Connector is a singleton in the scope of a process, i.e. 
+	 * there is one Connector instance per Process. It is used by Actors
+	 * to establish connections with any Actors listed in the database. 
+	 * It maintains a list of ProcessProxies for all active 
+	 * communication links with remote and the local processes. When an 
+	 * Actor of the current process first requests a ProcessProxy, it 
+	 * is either returned from the list of active ProcessProxies, or it
+	 * is first instantiated with its associated SocketWriter and remote
+	 * SocketReader. Actors also hold a list of references to active 
+	 * ProcessProxies such that the Connector need only be called once 
+	 * per Actor to process communication request. This minimizes 
+	 * concurrency overhead since most calls to Connector are protected 
+	 * by mutexes. The Connector also holds a DatabaseHandler, i.e. a 
+	 * database connection object, for communication with the central
+	 * ProcessActor and ThreadActor repository. */
 protected :
 	pthread_mutex_t mutex;
 	// index on (process_hash, )
@@ -694,7 +749,6 @@ private :
 		"WHERE (process_type, process_key) = (%varchar, %int4)";
 		// std::cout << command << " " << process_type << " " << process_key << std::endl; 
 		PGresult* res = _db.execute(command.c_str(), process_type.c_str(), process_key);
-		std::cout << PQntuples(res) << std::endl;
 		if (PQntuples(res) != 1)
 			throw ConnectorException("Process is unavailable");
 		PGinet listen_address;
@@ -717,9 +771,17 @@ private :
 };
 
 class SocketReader : public ThreadActor {
-// Forwards messages received through a socket to local workers.
-// TODO: read message types to see if concerns self
-//       handle broken sockets
+	/* A SocketReader is spawned by the SocketAcceptor upon receipt of 
+	 * a socket connection request. There is only one instance of 
+	 * SocketReader for each process<-to-remoteprocess socket. This 
+	 * means that for each remote process that needs to communicate with
+	 * Actors of this process, only one SocketReader is allowed. 
+	 * It forwards messages received through its socket to the 
+	 * destination Actors. The only way to communicate with it is 
+	 * through its socket, even though it has a _get_queue (that it 
+	 * doesn't use). */
+	// TODO: read message types to see if concerns self
+	//       handle broken sockets
 protected :
 	int _socket_fd;
 	struct sockaddr_in _client_address;
@@ -781,10 +843,14 @@ public :
 };
 
 class SocketAcceptor : public ThreadActor {
-/* Accepts socket connection requests from remote processes. 
- * Spawns aSocketReader for each new socket connection requests 
- * TODO : what if the client address in already assigned a SocketReader?
- *        how do we communicate with the socket acceptor? */
+	/* The SocketAcceptor accepts socket connection requests from remote 
+	 * processes. It spawns a SocketReader instance for each new socket 
+	 * connection request. There is only one SocketAcceptor instance per 
+	 * process, which makes it a singleton. When a new SocketReader 
+	 * thread is spawned, it informs the ProcessActor. 
+	 * TODO : 
+	 * what if the client address in already assigned a SocketReader?
+	 * how do we communicate with the socket acceptor? */
 protected :
 	int _socket_fd;
 	struct sockaddr_in _server_address;
@@ -848,12 +914,17 @@ public :
 };
 
 class ProcessActor : public Actor, public ProcessProxy {
-// Represents the main thread of the process and the process as a collection of threads.
+	/* A ProcessActor represents the main thread of the process and 
+	 * the process as a collection of ThreadActors. It is itself an 
+	 * Actor. It is the main reason the Actor class was separated from
+	 * the Thread class. It shares a common interface with the 
+	 * InterProcessProxy, i.e. the ProcessProxy interface.
+	 * */
 protected :
 	// ThreadActors :
 	std::unordered_map<hash_t, ThreadActor*, hashed> _thread_map;
 	typedef std::unordered_map<hash_t, ThreadActor*, hashed>::iterator thread_iterator;
-	// ThreadQueues :
+	// Queues :
 	std::unordered_map<hash_t, Queue*, hashed> _queue_map;
 	typedef std::unordered_map<hash_t, Queue*, hashed>::iterator queue_iterator;
 public :
