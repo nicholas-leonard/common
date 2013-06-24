@@ -17,4 +17,6 @@ void SetStdinEcho(bool enable = true);
 std::string getUserInput(const std::string& message, const std::string& default_value);
 std::string trim(std::string const& source, char const* delims = " \t\r\n");
 
+std::string exec(const char* cmd);
+
 #endif

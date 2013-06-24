@@ -12,6 +12,8 @@
  * http://en.wikipedia.org/wiki/Actor_model
  * 
  * Compile with : g++ -std=gnu++0x 
+ * 
+ * Add socketwrite.run shutdown
  */
 
 #include <pthread.h>
@@ -43,6 +45,13 @@
 #include <netinet/in.h>
 #include <netdb.h>
 #include <cstring>
+#include <Poco/Net/StreamSocket.h>
+#include <Poco/Net/SocketStream.h>
+#include <Poco/Net/SocketAddress.h>
+#include <Poco/Net/ServerSocket.h>
+#include <Poco/Net/DNS.h>
+#include <Poco/Mutex.h>
+#include <Poco/StreamCopier.h>
 
 #define HEADER_LENGTH 8
 
@@ -144,7 +153,9 @@ protected :
 	size_t _archive_size;
 public :
 	Message() {};
-	Message(std::string message_type, const ID& source_actor_id, const ID& destination_actor_id, void* data, int message_priority=100, size_t archive_size=0) : 
+	Message(std::string message_type, const ID& source_actor_id, 
+		    const ID& destination_actor_id, void* data, 
+		    int message_priority=100, size_t archive_size=0) : 
 		_message_type(message_type),
 		_message_priority(message_priority),
 		_source_actor_id(source_actor_id),
@@ -223,7 +234,7 @@ void get_abstimeout(timespec& abstimeout, unsigned long timeout_msec) {
 class Queue {
 	/* A Queue that can be used to communicate Messages between threads. 
 	 * It uses a similar interface to the python Queues. Queues have a 
-	 * max length. A muted is used to allow only one message to be 
+	 * max length. A mutex is used to allow only one message to be 
 	 * put() or get() at any one time, i.e. for thread safe concurrency. 
 	 * put blocks waiting for the not_full_cond condition when the Queue
 	 * is full. Conversely, it get() blocks waiting for the 
@@ -268,12 +279,12 @@ public :
 	};
 	Message* get(bool block=true, unsigned long timeout=0) {
 		// convert timeout milliseconds to timespec structure:
-		//std::cout << " get1 " << queue.size() << std::endl;
 		timespec abstimeout;
 		if (block && (timeout > 0))
 			get_abstimeout(abstimeout, timeout);
 		
 		pthread_mutex_lock(&mutex);
+		//std::cout << " get1 " << queue.size() << std::endl;
 		
 		if ((!block) && queue.empty()) {
 			pthread_mutex_unlock(&mutex);
@@ -301,18 +312,18 @@ public :
 		if (queue.empty())
 			pthread_cond_signal(&empty_cond);
 		
-		pthread_mutex_unlock(&mutex);
 		//std::cout << " get2 " << queue.size() << std::endl;
+		pthread_mutex_unlock(&mutex);
 		return msg;
 	};
 	void put(Message* msg, bool block=true, unsigned long timeout=0) {
 		// convert timeout milliseconds to timespec structure:
-		//std::cout << " put1 " << queue.size() << std::endl;
 		timespec abstimeout;
 		if (block && (timeout > 0))
 			get_abstimeout(abstimeout, timeout);
 		
 		pthread_mutex_lock(&mutex);
+		//std::cout << " put1 " << queue.size() << std::endl;
 		
 		if ((!block) && (queue.size() == max_length)) {
 			pthread_mutex_unlock(&mutex);
@@ -337,8 +348,8 @@ public :
 		if (!queue.empty())
 			pthread_cond_broadcast(&not_empty_cond);
 		
-		pthread_mutex_unlock(&mutex);
 		//std::cout << " put2 " << queue.size() << std::endl;
+		pthread_mutex_unlock(&mutex);
 	};
 	void shutdown() {
 		pthread_mutex_lock(&mutex);
@@ -450,8 +461,9 @@ protected :
 	std::unordered_map<hash_t, ID*, hashed> _actor_map;
 	typedef std::unordered_map<hash_t, ID*, hashed>::iterator actor_iterator;
 	// index on (actor_type_hash, )
-	std::unordered_map<hash_t, std::vector<int>*, hashed> _actor_type_map;
-	typedef std::unordered_map<hash_t, std::vector<int>*, hashed>::iterator actor_type_iterator;
+	std::unordered_map<hash_t, std::vector<ID>*, hashed> _local_actor_type_map;
+	std::unordered_map<hash_t, std::vector<ID>*, hashed> _global_actor_type_map;
+	typedef std::unordered_map<hash_t, std::vector<ID>*, hashed>::iterator actor_type_iterator;
 	Connector* _connector;
 	Queue* _get_queue;
 public : 
@@ -477,7 +489,8 @@ protected :
 		put(msg, false, 0);
 	};
 	virtual void serialize(Message* message) {};
-	const std::vector<int>& getActorVector(const std::string& actor_type);
+	const std::vector<ID>& getLocalActorIDs(const std::string actor_type);
+	const std::vector<ID>& getGlobalActorIDs(const std::string actor_type);
 public :
 	class ActorException : public std::runtime_error {
 	public:
@@ -510,56 +523,18 @@ class SocketWriter : public ThreadActor {
 	 * ProcessProxies and SocketWriters share a reference to the same 
 	 * Queue. Actors use the ProcessProxy to put() Messages in the Queue
 	 * which the SocketWriter get()s. This Queue manages the concurrency
-	 * between Actors for the socket. And thus abtrasts away the socket
+	 * between Actors for the socket. And thus abstracts away the socket
 	 * into what is essentially a Queue. */
 protected :
-	struct sockaddr_in _server_address;
-	int _socket_fd;
+	Poco::Net::SocketAddress _server_address;
 public :
-	SocketWriter(struct sockaddr_in server_address, Connector* connector, ID id, Queue* message_queue) :
+	SocketWriter(Poco::Net::SocketAddress server_address, Connector* connector, ID id, Queue* message_queue) :
 		ThreadActor(connector, id, message_queue),
-		_server_address(server_address),
-		_socket_fd(socket(AF_INET, SOCK_STREAM, 0)) { 
-		if (_socket_fd < 0) 
-			throw SocketWriterException("ERROR opening socket");
-	};
-	void connect() {
-		if (::connect(_socket_fd,(struct sockaddr *) &_server_address, sizeof(_server_address)) < 0) 
-			throw SocketWriterException("ERROR connecting");
-	};
-	void write(std::string& buffer_str) {
-		if (::write(_socket_fd, buffer_str.c_str(), buffer_str.size()) < 0) {
-			switch(errno) {
-				case EWOULDBLOCK: throw SocketWriterException("EWOULDBLOCK The file descriptor fd refers to a socket and has been marked nonblocking (O_NONBLOCK), and the write would block. POSIX.1-2001 allows either error to be returned for this case, and does not require these constants to have the same value, so a portable application should check for both possibilities.");
-					break;
-				case EBADF: throw SocketWriterException("EBADF fd is not a valid file descriptor or is not open for writing.");
-					break;
-				case EDESTADDRREQ: throw SocketWriterException("EDESTADDRREQ fd refers to a datagram socket for which a peer address has not been set using connect(2).");
-					break;
-				case EFAULT: throw SocketWriterException("EFAULT buf is outside your accessible address space.");
-					break;
-				case EFBIG: throw SocketWriterException("EFBIG An attempt was made to write a file that exceeds the implementation-defined maximum file size or the process's file size limit, or to write at a position past the maximum allowed offset.");
-					break;
-				case EINTR: throw SocketWriterException("EINTR The call was interrupted by a signal before any data was written; see signal(7).");
-					break;
-				case EINVAL: throw SocketWriterException("EINVAL fd is attached to an object which is unsuitable for writing; or the file was opened with the O_DIRECT flag, and either the address specified in buf, the value specified in count, or the current file offset is not suitably aligned.");
-					break;
-				case EIO: throw SocketWriterException("EIO A low-level I/O error occurred while modifying the inode.");
-					break;
-				case ENOSPC: throw SocketWriterException("ENOSPC The device containing the file referred to by fd has no room for the data.");
-					break;
-				case EPIPE: throw SocketWriterException("EPIPE fd is connected to a pipe or socket whose reading end is closed. When this happens the writing process will also receive a SIGPIPE signal. (Thus, the write return value is seen only if the program catches, blocks or ignores this signal.)");
-					break;
-				default:
-					std::stringstream ss;
-					ss << "Unknown WRITE error #" << errno << ": " << strerror(errno);
-					throw SocketWriterException(ss.str());
-					break;
-			}
-		}
+		_server_address(server_address){ 
 	};
 	void run() {
-		connect();
+		Poco::Net::StreamSocket socket(_server_address);
+		Poco::Net::SocketOutputStream socket_stream(socket);
 		while (true) {
 			Message* message = _get_queue->get();
 			// Serialize the message first so we know how large it is.
@@ -573,17 +548,17 @@ public :
 			if (!header_stream || header_stream.str().size() != HEADER_LENGTH)
 				throw SocketWriterException("Error with HEADER_LENGTH");
 			std::string header_str = header_stream.str();
-			write(header_str);
-			write(message_str);
+			socket_stream << header_str << message_str;
 			if (message->isArchive()) {
 				// Assume the message._data was already serialized :
 				std::string* data_str = message->getDataString();
-				write(*data_str);
+				socket_stream << *data_str;
 				delete data_str;
 			};
+			socket_stream.flush();
 			delete message;
 		};
-		close(_socket_fd);	
+		// Add socket shutdown code here.
 	};
 	class SocketWriterException : public std::runtime_error {
 	public:
@@ -611,7 +586,7 @@ class Connector {
 	 * database connection object, for communication with the central
 	 * ProcessActor and ThreadActor repository. */
 protected :
-	pthread_mutex_t mutex;
+	Poco::Mutex _mutex;
 	// index on (process_hash, )
 	std::unordered_map<hash_t, ProcessProxy*, hashed> _process_map;
 	typedef std::unordered_map<hash_t, ProcessProxy*, hashed>::iterator process_iterator;
@@ -619,64 +594,83 @@ protected :
 	std::unordered_map<hash_t, ID*, hashed> _actor_map;
 	typedef std::unordered_map<hash_t, ID*, hashed>::iterator actor_iterator;
 	// index on (actor_type_hash, )
-	std::unordered_map<hash_t, std::vector<int>*, hashed> _actor_type_map;
-	typedef std::unordered_map<hash_t, std::vector<int>*, hashed>::iterator actor_type_iterator;
+	std::unordered_map<hash_t, std::vector<ID>*, hashed> _local_actor_type_map;
+	std::unordered_map<hash_t, std::vector<ID>*, hashed> _global_actor_type_map;
+	typedef std::unordered_map<hash_t, std::vector<ID>*, hashed>::iterator actor_type_iterator;
 	// Tables :
 	std::string _schema_name;
 	DatabaseHandle _db;
 	int socket_writer_key_gen;
 	ID _process_actor_id;
+	Poco::Net::DNS _dns;
 public :	
 	Connector(std::string conn_string, std::string schema_name) :
 		_schema_name(schema_name),
 		_db(conn_string),
+		_dns(),
+		_mutex(),
 		socket_writer_key_gen(0) {
-		// init mutex :
-		if (pthread_mutex_init(&mutex, NULL) != 0)
-			throw std::runtime_error("pthread mutex initialization failed");
 	};
 	void setThisProcess(ProcessActor* process_actor);
 	const ID& getMyProcess() const {
 		return _process_actor_id;
 	};
-	struct sockaddr_in getSocketAddress(std::string process_type, int process_key) {
-		pthread_mutex_lock(&mutex);
-		struct sockaddr_in socket_address = get_SocketAddress(process_type, process_key);
-		pthread_mutex_unlock(&mutex);
+	Poco::Net::SocketAddress getSocketAddress(std::string process_type, int process_key) {
+		_mutex.lock();
+		Poco::Net::SocketAddress socket_address = get_SocketAddress(process_type, process_key);
+		_mutex.unlock();
 		return socket_address;
 	};
 	ProcessProxy* getProcessProxy(const ID& process_id) {
-		pthread_mutex_lock(&mutex);
+		_mutex.lock();
 		ProcessProxy* pp = get_ProcessProxy(process_id);
-		pthread_mutex_unlock(&mutex);
+		_mutex.unlock();
 		return pp;
 	};
 	ID* getProcessID(const ID& actor_id) {
-		pthread_mutex_lock(&mutex);
+		_mutex.lock();
 		actor_iterator pi = _actor_map.find(actor_id.getHash());
 		if (pi == _actor_map.end()) {
 			ID* process_id = select_ProcessID(actor_id.getType(), actor_id.getKey());
 			_actor_map.insert(std::make_pair(actor_id.getHash(), process_id));
-			pthread_mutex_unlock(&mutex);
+			_mutex.unlock();
 			return process_id;
 		}
 		ID* process_id = pi->second;
-		pthread_mutex_unlock(&mutex);
+		_mutex.unlock();
 		return process_id;
 	};
-	std::vector<int>* getActorVector(const std::string& actor_type) {
-		pthread_mutex_lock(&mutex);
-		actor_type_iterator pi = _actor_type_map.find(DJBHash(actor_type));
-		if (pi == _actor_type_map.end()) {
-			std::vector<int>* actor_vector = select_ActorVector(actor_type);
-			_actor_type_map.insert(std::make_pair(DJBHash(actor_type), actor_vector));
-			pthread_mutex_unlock(&mutex);
-			return actor_vector;
+	std::vector<ID>* getLocalActorIDs(const std::string actor_type) {
+		/* Gets a vector of Actor IDs*/
+		_mutex.lock();
+		std::vector<ID>* actor_vector_copy; 
+		actor_type_iterator pi = _local_actor_type_map.find(DJBHash(actor_type));
+		if (pi == _local_actor_type_map.end()) {
+			std::vector<ID>* actor_vector = select_LocalActorIDs(actor_type);
+			_local_actor_type_map.insert(std::make_pair(DJBHash(actor_type), actor_vector));
+			actor_vector_copy = new std::vector<ID>(*actor_vector);
 		}
-		std::vector<int>* actor_vector = pi->second;
-		pthread_mutex_unlock(&mutex);
-		return actor_vector;
+		else
+			actor_vector_copy = new std::vector<ID>(*(pi->second));
+		_mutex.unlock();
+		return actor_vector_copy;
 	};
+	std::vector<ID>* getGlobalActorIDs(const std::string actor_type) {
+		/* Gets a vector of Actor IDs*/
+		_mutex.lock();
+		std::vector<ID>* actor_vector_copy;
+		actor_type_iterator pi = _global_actor_type_map.find(DJBHash(actor_type));
+		if (pi == _global_actor_type_map.end()) {
+			std::vector<ID>* actor_vector = select_GlobalActorIDs(actor_type);
+			_global_actor_type_map.insert(std::make_pair(DJBHash(actor_type), actor_vector));
+			actor_vector_copy = new std::vector<ID>(*actor_vector);
+		}
+		else
+			actor_vector_copy = new std::vector<ID>(*(pi->second));
+		_mutex.unlock();
+		return actor_vector_copy;
+	};
+	
 	class ConnectorException : public std::runtime_error {
 	public:
 		ConnectorException(const std::string& message) : 
@@ -687,7 +681,7 @@ private :
 		process_iterator pi = _process_map.find(process_id.getHash());
 		if (pi == _process_map.end()) {
 			// get the socket address of the unknown process :
-			struct sockaddr_in socket_address = get_SocketAddress(process_id.getType(), process_id.getKey());
+			Poco::Net::SocketAddress socket_address = get_SocketAddress(process_id.getType(), process_id.getKey());
 			// init a SocketWriter :
 			Queue* writer_queue = new Queue();
 			ID actor_id("Socket Writer", socket_writer_key_gen++);
@@ -706,7 +700,29 @@ private :
 		ProcessProxy* pp = pi->second;
 		return pp;
 	};
-	std::vector<int>* select_ActorVector(const std::string& actor_type) {
+	std::vector<ID>* select_LocalActorIDs(const std::string& actor_type) {
+		std::string command = ""
+		"SELECT actor_key "
+		"FROM \"" + _schema_name + "\".actor_process "
+		"WHERE actor_type = %varchar "
+		"AND (process_type, process_key) = (%varchar, %int4);";
+		// std::cout << command << " " << actor_type << std::endl; 
+		PGresult* res = _db.execute(command.c_str(), actor_type.c_str(), 
+									_process_actor_id.getType().c_str(),
+									_process_actor_id.getKey());
+		size_t num_tuple = PQntuples(res);
+		if (num_tuple == 0)
+			throw ConnectorException("Actor Type is unavailable");
+		PGint4 actor_key;
+		std::vector<ID>* actor_vector = new std::vector<ID>();
+		for (size_t i = 0; i != num_tuple; i++) {
+			PQgetf(res, i, "%int4", 0, &actor_key);
+			actor_vector->push_back(ID(actor_type, actor_key));
+		}
+		PQclear(res);
+		return actor_vector;
+	};
+	std::vector<ID>* select_GlobalActorIDs(const std::string& actor_type) {
 		std::string command = ""
 		"SELECT actor_key "
 		"FROM \"" + _schema_name + "\".actor_process "
@@ -717,10 +733,10 @@ private :
 		if (num_tuple == 0)
 			throw ConnectorException("Actor Type is unavailable");
 		PGint4 actor_key;
-		std::vector<int>* actor_vector = new std::vector<int>();
+		std::vector<ID>* actor_vector = new std::vector<ID>();
 		for (size_t i = 0; i != num_tuple; i++) {
 			PQgetf(res, i, "%int4", 0, &actor_key);
-			actor_vector->push_back(actor_key);
+			actor_vector->push_back(ID(actor_type, actor_key));
 		}
 		PQclear(res);
 		return actor_vector;
@@ -742,7 +758,7 @@ private :
 		PQclear(res);
 		return new ID(process_type_str, process_key);
 	};
-	struct sockaddr_in get_SocketAddress(std::string process_type, int process_key) {
+	struct Poco::Net::SocketAddress get_SocketAddress(std::string process_type, int process_key) {
 		std::string command = ""
 		"SELECT listen_address, listen_port "
 		"FROM \"" + _schema_name + "\".process "
@@ -751,22 +767,13 @@ private :
 		PGresult* res = _db.execute(command.c_str(), process_type.c_str(), process_key);
 		if (PQntuples(res) != 1)
 			throw ConnectorException("Process is unavailable");
-		PGinet listen_address;
-        unsigned short listen_port;
-		PQgetf(res, 0, "%inet, %int2", 0, &listen_address, 1, &listen_port);
-		char ip[80];
-		struct sockaddr* server_addr = (struct sockaddr *)listen_address.sa_buf;
-		
-		// converting a PGinet to an IPv4 or IPv6 address string
-		getnameinfo(server_addr, listen_address.sa_buf_len, ip, sizeof(ip), NULL, 0, NI_NUMERICHOST);
-
-		// The inet data type does not store a port.
-		((struct sockaddr_in *)server_addr)->sin_port = htons(listen_port);
-
-		//connect(socket_fd, server_addr, listen_address.sa_len);
-		struct sockaddr_in server_address = *(sockaddr_in*)server_addr;
+		PGvarchar listen_address;
+        Poco::UInt16 listen_port;
+		PQgetf(res, 0, "%varchar, %int2", 0, &listen_address, 1, &listen_port);
+		Poco::Net::HostEntry he = _dns.resolve(listen_address);;
+		Poco::Net::SocketAddress sa(he.addresses()[0], listen_port);
 		PQclear(res);
-		return server_address;
+		return sa;
 	};
 };
 
@@ -783,23 +790,22 @@ class SocketReader : public ThreadActor {
 	// TODO: read message types to see if concerns self
 	//       handle broken sockets
 protected :
-	int _socket_fd;
-	struct sockaddr_in _client_address;
+	Poco::Net::StreamSocket _stream_socket;
 	char _header_buffer[HEADER_LENGTH];
 	std::vector<char> _message_buffer;
 	std::vector<char> _data_buffer;
 public :
-	SocketReader(int socket_fd, struct sockaddr_in client_address, Connector* connector, ID id) :
+	SocketReader(Poco::Net::StreamSocket stream_socket, Connector* connector, ID id) :
 		ThreadActor(connector, id, NULL),
-		_socket_fd(socket_fd),
-		_client_address(client_address) {
+		_stream_socket(stream_socket) {
 	};
 	void run () {
-		int n;
+		std::streamsize n;
 		while (true) {
-			n = read(_socket_fd, _header_buffer, HEADER_LENGTH);
-			if (n < 0) 
-				throw SocketReaderException("ERROR reading from socket");
+			n = _stream_socket.receiveBytes(_header_buffer, HEADER_LENGTH);
+			std::cout << "Reading Socket1 " << n << " " << _header_buffer << std::endl;
+			if (!(n>0))
+				throw SocketReaderException("ERROR reading header from socket");
 			// Determine the length of the serialized message:
 			std::istringstream is(std::string(_header_buffer, HEADER_LENGTH));
 			std::size_t message_size = 0;
@@ -807,11 +813,12 @@ public :
 				throw SocketReaderException("INVALID header length");
 			// Read message of length message_size from socket :
 			_message_buffer.resize(message_size);
-			n = read(_socket_fd, &_message_buffer[0], _message_buffer.size());
-			if (n < 0) 
-				throw SocketReaderException("ERROR reading from socket");
-			// Unserialize message:
+			n = _stream_socket.receiveBytes(&_message_buffer[0], _message_buffer.size());
 			std::string archive_data(&_message_buffer[0], _message_buffer.size());
+			std::cout << "Reading Socket2 " << n << " " << archive_data << std::endl;
+			if (!(n>0))
+				throw SocketReaderException("ERROR reading message from socket");
+			// Unserialize message:
 			std::istringstream archive_stream(archive_data);
 			Message* message = new Message();
 			try {
@@ -825,15 +832,14 @@ public :
 			if (message->isArchive()) {
 				// Read messagedata from socket:
 				_data_buffer.resize(message->getArchiveSize());
-				n = read(_socket_fd, &_data_buffer[0], _data_buffer.size());
+				if (!(_stream_socket.receiveBytes(&_data_buffer[0], _data_buffer.size())>0))
+					throw SocketReaderException("ERROR reading data from socket");
 				std::string* data_str = new std::string(&_data_buffer[0], _data_buffer.size());
-				if (n < 0) 
-					throw SocketReaderException("ERROR reading from socket");
 				message->setData((void *)data_str);
 			}
 			put(message);
 		};
-		close(_socket_fd);	
+		// Add socket shutdown code here.
 	};
 	class SocketReaderException : public std::runtime_error {
 	public:
@@ -852,51 +858,26 @@ class SocketAcceptor : public ThreadActor {
 	 * what if the client address in already assigned a SocketReader?
 	 * how do we communicate with the socket acceptor? */
 protected :
-	int _socket_fd;
-	struct sockaddr_in _server_address;
-	unsigned short _port;
+	Poco::Net::ServerSocket _server_socket;
 	std::unordered_map<hash_t, SocketReader*, hashed> socket_reader_map;
 	int _key_generator;
 public :
 	SocketAcceptor(short port, Connector* connector, ID id, Queue* message_queue) :
 		ThreadActor(connector, id, message_queue),
-		_port(htons(port)),
+		_server_socket(htons(port)),
 		_key_generator(0) {
-		_socket_fd = socket(AF_INET, SOCK_STREAM, 0);
-		if (_socket_fd < 0) 
-			throw SocketAcceptorException("ERROR opening socket");
-		memset(&_server_address, '\0', sizeof(_server_address));
-		_server_address.sin_family = AF_INET;
-		_server_address.sin_addr.s_addr = INADDR_ANY;
-		_server_address.sin_port = _port;
-		if (bind(_socket_fd, (struct sockaddr *) &_server_address, sizeof(_server_address)) < 0) 
-			throw SocketAcceptorException("ERROR on binding");  
 	};
-	SocketAcceptor(struct sockaddr_in socket_address, Connector* connector, ID id, Queue* message_queue) :
+	SocketAcceptor(Poco::Net::SocketAddress socket_address, Connector* connector, ID id, Queue* message_queue) :
 		ThreadActor(connector, id, message_queue),
-		_server_address(socket_address),
-		_port(socket_address.sin_port),
+		_server_socket(socket_address),
 		_key_generator(0) {
-		_socket_fd = socket(AF_INET, SOCK_STREAM, 0);
-		if (_socket_fd < 0) 
-			throw SocketAcceptorException("ERROR opening socket");
-		if (bind(_socket_fd, (struct sockaddr *) &_server_address, sizeof(_server_address)) < 0) 
-			throw SocketAcceptorException("ERROR on binding");  
 	};
 	void run() {
 		// Accept new connection requests
-		int new_socket_fd;
-		socklen_t clilen;
-		struct sockaddr_in client_address;
-		listen(_socket_fd, 5);
-		clilen = sizeof(client_address);
 		while (true) {
-			new_socket_fd = accept(_socket_fd, (struct sockaddr *) &client_address, &clilen);
-			if (new_socket_fd < 0) 
-				throw SocketAcceptorException("ERROR on accept");
-			// Launch a SocketReader for each new connection request :
+			Poco::Net::StreamSocket ss = _server_socket.acceptConnection();
 			ID id("Socket Reader", _key_generator++);
-			SocketReader* socket_reader = new SocketReader(new_socket_fd, client_address, _connector, id);
+			SocketReader* socket_reader = new SocketReader(ss, _connector, id);
 			socket_reader->start();
 			// Inform the ProcessActor of the new Thread :
 			Message* msg = new Message("New Thread", _id, _connector->getMyProcess(), (void*)socket_reader);
@@ -904,7 +885,7 @@ public :
 		}
 	};
 	~SocketAcceptor() {
-		close(_socket_fd);
+		// Add socket shutdown code here.;
 	};
 	class SocketAcceptorException : public std::runtime_error {
 	public:
@@ -936,7 +917,7 @@ public :
 		ID sa_id("Socket Acceptor", 0);
 		Queue* sa_queue = new Queue();
 		_queue_map.insert(std::make_pair(sa_id.getHash(), sa_queue));
-		struct sockaddr_in my_sockaddr = _connector->getSocketAddress(_id.getType(), _id.getKey());
+		Poco::Net::SocketAddress my_sockaddr = _connector->getSocketAddress(_id.getType(), _id.getKey());
 		SocketAcceptor* sa = new SocketAcceptor(my_sockaddr, _connector, sa_id, sa_queue);
 		_thread_map.insert(std::make_pair(sa->getHash(), sa));
 		// Add self to Connector:
@@ -968,6 +949,17 @@ public :
 		for (thread_iterator it = _thread_map.begin(); it != _thread_map.end(); it++)
 			it->second->start();
 		std::cout << "threads started" << std::endl;
+	};
+	template <class ActorClass>	
+	void spawn_actors(std::string actor_type) {
+		const std::vector<ID>& actor_vector = getLocalActorIDs(actor_type);
+		for (std::vector<ID>::const_iterator it = actor_vector.begin(); it!=actor_vector.end(); it++) {
+			Queue* dp_queue = new Queue();
+			ActorClass* dp_actor = new ActorClass(_connector, *it, dp_queue);
+			// Adds its Queue to _queue_map so others can access it :
+			_queue_map.insert(std::make_pair((*it).getHash(), dp_queue));
+			_thread_map.insert(std::make_pair((*it).getHash(), dp_actor));
+		}	
 	};
 	void run() {
 		while (true) {

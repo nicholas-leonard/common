@@ -47,15 +47,28 @@ const ID& Actor::getProcessID(ID& actor_id) {
 	return process_id;
 };
 
-const std::vector<int>& Actor::getActorVector(const std::string& actor_type) {
-	actor_type_iterator ati = _actor_type_map.find(DJBHash(actor_type.c_str()));
-	if (ati == _actor_type_map.end()) {
-		std::vector<int>* actor_vector = new std::vector<int>(*_connector->getActorVector(actor_type));
-		_actor_type_map.insert(std::make_pair(DJBHash(actor_type), actor_vector));
-		return *actor_vector;
+const std::vector<ID>& Actor::getLocalActorIDs(const std::string actor_type) {
+	std::vector<ID>* actor_vector;
+	actor_type_iterator ati = _local_actor_type_map.find(DJBHash(actor_type.c_str()));
+	if (ati == _local_actor_type_map.end()) {
+		actor_vector = _connector->getLocalActorIDs(actor_type);
+		_local_actor_type_map.insert(std::make_pair(DJBHash(actor_type), actor_vector));
+	} 
+	else
+		actor_vector = ati->second;
+	return *actor_vector;
+};
+
+const std::vector<ID>& Actor::getGlobalActorIDs(const std::string actor_type) {
+	std::vector<ID>* actor_vector;
+	actor_type_iterator ati = _global_actor_type_map.find(DJBHash(actor_type.c_str()));
+	if (ati == _global_actor_type_map.end()) {
+		actor_vector = _connector->getGlobalActorIDs(actor_type);
+		_global_actor_type_map.insert(std::make_pair(DJBHash(actor_type), actor_vector));
 	}
-	std::vector<int>& actor_vector = (*ati->second);
-	return actor_vector;
+	else
+		actor_vector = ati->second;
+	return *actor_vector;
 };
 
 void Connector::setThisProcess(ProcessActor* process_actor) {

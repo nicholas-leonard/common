@@ -7,8 +7,6 @@
  
 #include "utils.hpp"
 
-using std::string; using std::cout; using std::cin; using std::endl;
-
 // http://stackoverflow.com/questions/1413445/read-a-password-from-stdcin :
 void SetStdinEcho(bool enable)
 {
@@ -37,10 +35,10 @@ void SetStdinEcho(bool enable)
 }
 
 //http://www.cplusplus.com/forum/general/28663/
-string getUserInput(const string& message, const string& default_value) {
-	string value;
-	cout << message << " (" << default_value << ") : ";
-	getline(cin,value);
+std::string getUserInput(const std::string& message, const std::string& default_value) {
+	std::string value;
+	std::cout << message << " (" << default_value << ") : ";
+	getline(std::cin,value);
 	if ( value == "" )
 		return default_value;
 	return value;
@@ -55,11 +53,25 @@ std::string trim(std::string const& source, char const* delims) {
 
 	index = result.find_first_not_of(delims);
 	if(index != std::string::npos)
-	result.erase(0, index);
+		result.erase(0, index);
 	else
-	result.erase();
+		result.erase();
 	return result;
 }
+
+std::string exec(const char* cmd) {
+    FILE* pipe = popen(cmd, "r");
+    if (!pipe) return "ERROR";
+    char buffer[128];
+    std::string result = "";
+    while(!feof(pipe)) {
+    	if(fgets(buffer, 128, pipe) != NULL)
+    		result += buffer;
+    }
+    pclose(pipe);
+    return result;
+}
+
 
 /*int main(int argc, char **argv) {
 	string username = getUserInput("Enter username", "Nicholas");

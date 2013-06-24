@@ -87,26 +87,23 @@ public :
 		};
 	};
 	void run() {
-		const std::vector<int>& actor_vector = getActorVector("Print");
-		std::vector<int>::const_iterator it = actor_vector.begin();
+		const std::vector<ID>& actor_vector = getGlobalActorIDs("Print");
+		std::vector<ID>::const_iterator it = actor_vector.begin();
 		while (true) {
 			Message* msg = _get_queue->get(); 
 			if (msg->getType() == "Print") {
 				if (it == actor_vector.end())
 					it = actor_vector.begin();
-				int actor_key = *it;
+				msg->setDestination(*it);
 				it++;
-				ID dest_actor_id("Print", actor_key);
-				msg->setDestination(dest_actor_id);
 				put(msg);
 			} else if (msg->getType() == "Join Now") {
 				delete msg;
 				if (_id.getKey() == 0) {
 					std::cout << "Forward tells Print actors to join now" << std::endl;
 					for(it = actor_vector.begin(); it != actor_vector.end(); it++) {
-						ID dest_actor_id("Print", *it);
 						// No data to serialize ...:
-						Message* msg = new Message("Join Now", _id, dest_actor_id, NULL, 1000);
+						Message* msg = new Message("Join Now", _id, *it, NULL, 1000);
 						put(msg);
 					};
 				};	
@@ -133,22 +130,21 @@ public :
 	};
 	void run() {
 		std::cout << _id.str() << " running" << std::endl;
-		const std::vector<int>& actor_vector = getActorVector("Forward");
+		const std::vector<ID>& actor_vector = getGlobalActorIDs("Forward");
 		size_t num_forward_actor = actor_vector.size();
-		for (int i=0; i!=10000; i++) {
-			for(std::vector<int>::const_iterator it = actor_vector.begin(); it!=actor_vector.end(); it++) {
-				int actor_key = *it;
+		for (int i=0; i!=10; i++) {
+			for(std::vector<ID>::const_iterator it = actor_vector.begin(); it!=actor_vector.end(); it++) {
 				std::stringstream ss;
-				ss << _id.getKey() << "Hello World" << i;
+				ss << _id.getKey() << " Hello World " << i;
+				std::cout << _id.str() << " send #" << i << std::endl;
 				PrintMessage* pm = new PrintMessage(ss.str());
-				ID dest_actor_id("Forward", actor_key);
-				Message* msg = new Message("Print", _id, dest_actor_id, (void*)pm, 10+(actor_key % num_forward_actor));
+				Message* msg = new Message("Print", _id, *it, (void*)pm, 10+((*it).getKey() % num_forward_actor));
 				put(msg);
 			}
 		}
 		size_t done_received(1);
 		if (_id.getKey() == 0) {
-			size_t num_print_actor = getActorVector("Distribute").size();
+			size_t num_print_actor = getGlobalActorIDs("Distribute").size();
 			// Barrier :
 			std::cout << "Distribute Barrier commencing" << std::endl;
 			while (done_received != num_print_actor) {
@@ -160,9 +156,8 @@ public :
 				delete msg;
 			}
 			std::cout << "Distribute Barrier propagating" << std::endl;
-			for(std::vector<int>::const_iterator it = actor_vector.begin(); it!=actor_vector.end(); it++) {
-				ID dest_actor_id("Forward", *it);
-				Message* msg = new Message("Join Now", _id, dest_actor_id, NULL, 1000);
+			for(std::vector<ID>::const_iterator it = actor_vector.begin(); it!=actor_vector.end(); it++) {
+				Message* msg = new Message("Join Now", _id, *it, NULL, 1000);
 				put(msg);
 			};
 		} else {
@@ -187,14 +182,13 @@ class ServerProcess: public ProcessActor {
 public :
 	ServerProcess(std::string conn_string, ID id) :
 		ProcessActor(new Connector(conn_string, "test"), id, new Queue()) {
-		const std::vector<int>& print_vector = getActorVector("Print");
-		for (std::vector<int>::const_iterator it = print_vector.begin(); it!=print_vector.end(); it++) {
-			ID pa_id("Print", *it);
+		const std::vector<ID>& print_vector = getLocalActorIDs("Print");
+		for (std::vector<ID>::const_iterator it = print_vector.begin(); it!=print_vector.end(); it++) {
 			Queue* q = new Queue();
-			PrintActor* pa = new PrintActor(_connector, pa_id, q);
+			PrintActor* pa = new PrintActor(_connector, *it, q);
 			// Adds its Queue to _queue_map so others can access it :
-			_queue_map.insert(std::make_pair(pa_id.getHash(), q));
-			_thread_map.insert(std::make_pair(pa_id.getHash(), pa));
+			_queue_map.insert(std::make_pair((*it).getHash(), q));
+			_thread_map.insert(std::make_pair((*it).getHash(), pa));
 		}	
 		std::cout << "Server Process initialized" << std::endl;	
 	}
@@ -204,23 +198,21 @@ class ClientProcess: public ProcessActor {
 public :
 	ClientProcess(std::string conn_string, ID id) :
 		ProcessActor(new Connector(conn_string, "test"), id, new Queue()) {
-		const std::vector<int>& distribute_vector = getActorVector("Distribute");
-		for (std::vector<int>::const_iterator it = distribute_vector.begin(); it!=distribute_vector.end(); it++) {
-			ID da_id("Distribute", *it);
+		const std::vector<ID>& distribute_vector = getLocalActorIDs("Distribute");
+		for (std::vector<ID>::const_iterator it = distribute_vector.begin(); it!=distribute_vector.end(); it++) {
 			Queue* q = new Queue();
-			DistributeActor* da = new DistributeActor(_connector, da_id, q);
+			DistributeActor* da = new DistributeActor(_connector, *it, q);
 			// Adds its Queue to _queue_map so others can access it :
-			_queue_map.insert(std::make_pair(da_id.getHash(), q));
-			_thread_map.insert(std::make_pair(da_id.getHash(), da));	
+			_queue_map.insert(std::make_pair((*it).getHash(), q));
+			_thread_map.insert(std::make_pair((*it).getHash(), da));	
 		}
-		const std::vector<int>& forward_vector = getActorVector("Forward");
-		for (std::vector<int>::const_iterator it = forward_vector.begin(); it!=forward_vector.end(); it++) {
-			ID fa_id("Forward", *it);
+		const std::vector<ID>& forward_vector = getLocalActorIDs("Forward");
+		for (std::vector<ID>::const_iterator it = forward_vector.begin(); it!=forward_vector.end(); it++) {
 			Queue* q = new Queue();
-			ForwardActor* fa = new ForwardActor(_connector, fa_id, q);
+			ForwardActor* fa = new ForwardActor(_connector, *it, q);
 			// Adds its Queue to _queue_map so others can access it :
-			_queue_map.insert(std::make_pair(fa_id.getHash(), q));
-			_thread_map.insert(std::make_pair(fa_id.getHash(), fa));
+			_queue_map.insert(std::make_pair((*it).getHash(), q));
+			_thread_map.insert(std::make_pair((*it).getHash(), fa));
 		}		
 		std::cout << "Client Process initialized" << std::endl;	
 	}
