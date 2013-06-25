@@ -47,16 +47,11 @@ public :
 		while (true) {
 			try {
 				Message* msg = _get_queue->get();
-				if ((msg->getType() == "Print") and msg->isArchive()) {
-					PrintMessage* pm = new PrintMessage();
-					std::string* data_str = msg->getDataString();
-					std::istringstream archive_stream(*data_str);
-					boost::archive::text_iarchive archive(archive_stream);
-					archive >> (*pm);
+				if (msg->getType() == "Print") {
+					PrintMessage* pm = msg->getData<PrintMessage>();
 					pm->print(_id.str());
 					delete msg;
 					delete pm;
-					delete data_str;
 				} else if (msg->getType() == "Join Now") {
 					std::cout << "Print exiting" << std::endl;
 					pthread_exit(NULL);
@@ -75,17 +70,6 @@ public :
 	ForwardActor(Connector* connector, ID id, Queue* message_queue) :
 		ThreadActor(connector, id, message_queue)  {
 	};
-	void serialize(Message* msg) {
-		if (msg->getType() == "Print") {
-			PrintMessage* pm = (PrintMessage*)msg->getData();
-			std::ostringstream archive_stream;
-			boost::archive::text_oarchive archive(archive_stream);
-			archive << (*pm);
-			std::string* pm_str = new std::string(archive_stream.str());
-			delete pm;
-			msg->setDataString(pm_str);
-		};
-	};
 	void run() {
 		const std::vector<ID>& actor_vector = getGlobalActorIDs("Print");
 		std::vector<ID>::const_iterator it = actor_vector.begin();
@@ -96,7 +80,7 @@ public :
 					it = actor_vector.begin();
 				msg->setDestination(*it);
 				it++;
-				put(msg);
+				put<PrintMessage>(msg);
 			} else if (msg->getType() == "Join Now") {
 				delete msg;
 				if (_id.getKey() == 0) {

@@ -1,6 +1,6 @@
 #ifndef _THREADING_H_
 #define _THREADING_H_ 1
-
+ 
 /*
  * threading.hpp
  * 
@@ -14,6 +14,7 @@
  * Compile with : g++ -std=gnu++0x 
  * 
  * Add socketwrite.run shutdown
+ * fix null message_data bug (serialize detects it)
  */
 
 #include <pthread.h>
@@ -178,15 +179,106 @@ public :
 	void setDestination(const ID& destination_actor_id) {
 		_destination_actor_id = destination_actor_id;
 	}; 
+	template <class DataType> 
+	void serialize() {
+		if (_data == NULL)
+			return;
+		DataType* pm = (DataType*)_data;
+		std::ostringstream archive_stream;
+		boost::archive::text_oarchive archive(archive_stream);
+		archive << (*pm);
+		std::string* pm_str = new std::string(archive_stream.str());
+		delete pm;
+		setDataString(pm_str);
+	};
+	template <class DataType>
+	void unserialize() {
+		if (!isArchive())
+			return;
+		DataType* unserialized_data = new DataType();
+		std::string* data_str = getDataString();
+		std::istringstream archive_stream(*data_str);
+		boost::archive::text_iarchive archive(archive_stream);
+		archive >> (*unserialized_data);
+		delete data_str;
+		_data = unserialized_data;
+		_archive_size = 0;
+	};
+	template <class DataType>
+	DataType* getData() {
+		unserialize<DataType>();
+		return (DataType*)_data;
+	};
+	void send(Poco::Net::SocketOutputStream& socket_stream, bool keep_data = false) {
+		/* Sends message through the socket stream. When keep_data is 
+		 * false, _data is deleted as std::string*. If _data is pointing
+		 * to anything, it must have been serialized beforehand. */
+		// Serialize the message first so we know how large it is.
+		std::ostringstream archive_stream;
+		boost::archive::text_oarchive archive(archive_stream);
+		archive << (*this);
+		std::string message_str = archive_stream.str();
+		// Format the header.
+		std::ostringstream header_stream;
+		header_stream << std::setw(HEADER_LENGTH) << std::hex << message_str.size();
+		if (!header_stream || header_stream.str().size() != HEADER_LENGTH)
+			throw MessageException("Error with HEADER_LENGTH");
+		std::string header_str = header_stream.str();
+		socket_stream << header_str << message_str;
+		if (isArchive()) {
+			std::string* data_str = getDataString();
+			socket_stream << *data_str;
+			if (!keep_data)
+				delete data_str;
+		} else if (_data != NULL) {
+			throw MessageException("Message._data wasn't serialized");
+		};
+		socket_stream.flush();
+	};
+	static Message* receive(Poco::Net::StreamSocket& stream_socket, std::vector<char>& buffer){
+		buffer.resize(HEADER_LENGTH);
+		std::streamsize n = stream_socket.receiveBytes(&buffer[0], HEADER_LENGTH);
+		std::string header(&buffer[0], HEADER_LENGTH);
+		std::cout << "Reading Socket1 " << n << " " << header << std::endl;
+		if (!(n>0))
+			throw MessageException("ERROR reading header from socket");
+		// Determine the length of the serialized message:
+		std::istringstream is(header);
+		std::size_t message_size = 0;
+		if (!(is >> std::hex >> message_size))
+			throw MessageException("INVALID header length");
+		std::cout << "Message size " << message_size << std::endl;
+		// Read message of length message_size from socket :
+		buffer.resize(message_size);
+		n = stream_socket.receiveBytes(&buffer[0], buffer.size());
+		std::string archive_data(&buffer[0], buffer.size());
+		std::cout << "Reading Socket2 " << n << " " << archive_data << std::endl;
+		if (!(n>0))
+			throw MessageException("ERROR reading message from socket");
+		// Unserialize message:
+		std::istringstream archive_stream(archive_data);
+		Message* msg = new Message();
+		try {
+			boost::archive::text_iarchive archive(archive_stream);
+			archive >> (*msg);
+		} catch (boost::archive::archive_exception& e) {
+			std::stringstream ss;
+			ss << "ERROR reading message archive : " << e.what();
+			throw MessageException(ss.str());
+		}
+		if (msg->isArchive()) {
+			// Read messagedata from socket:
+			buffer.resize(msg->getArchiveSize());
+			n = stream_socket.receiveBytes(&buffer[0], buffer.size());
+			if (!(n>0))
+				throw MessageException("ERROR reading data from socket");
+			std::string* data_str = new std::string(&buffer[0], buffer.size());
+			msg->setData((void *)data_str);
+		}
+		return msg;
+	};
 	void* getData() {
 		return _data;
-	};
-	std::string* getDataString() {
-		return (std::string*)_data;
-	};
-	void setDataString(std::string* data_str) {
-		_data = (void*) data_str;
-		_archive_size = data_str->size();
 	};
 	void setData(void* data) {
 		_data = data;
@@ -208,14 +300,20 @@ private :
     // & operator is defined similar to <<.  Likewise, when the class Archive
     // is a type of input archive the & operator is defined similar to >>.
     template<class Archive>
-    void serialize(Archive & ar, const unsigned int version)
-    {
+    void serialize(Archive & ar, const unsigned int version) {
         ar & _message_type;
         ar & _message_priority;
         ar & _source_actor_id;
         ar & _destination_actor_id;
         ar & _archive_size;
-    }
+    };
+    std::string* getDataString() {
+		return (std::string*)_data;
+	};
+	void setDataString(std::string* data_str) {
+		_data = (void*) data_str;
+		_archive_size = data_str->size();
+	};
 };
 
 static inline 
@@ -479,16 +577,38 @@ public :
 	const ID& getID() const {
 		return _id;
 	};
-	const ID& getProcessID(ID& actor_id);
 protected :
-	void put(Message* message, bool block=true, int timeout=0);
+	ID& getProcessID(ID& actor_id);
+	bool outboundMessage(ID& process_id);
+	ProcessProxy& getProcessProxy(ID& process_id);
+	void put(Message* message, bool block=true, int timeout=0){
+		put<std::string>(message, block, timeout);
+	};
 	void put_timeout(Message* msg, unsigned long timeout) {
-		put(msg, true, timeout);
+		put<std::string>(msg, true, timeout);
 	};
 	void put_nowait(Message* msg) {
-		put(msg, false, 0);
+		put<std::string>(msg, false, 0);
 	};
-	virtual void serialize(Message* message) {};
+	template <class DataType>
+	void put(Message* message, bool block=true, int timeout=0){
+		// Get destination_process :
+		ID& destination_process = getProcessID(message->getDestination());
+		// Message going out? Serialize :
+		if (outboundMessage(destination_process))
+			message->serialize<DataType>();
+		// Get process_proxy :
+		ProcessProxy& process_proxy = getProcessProxy(destination_process);
+		process_proxy.send(message, block, timeout);
+	};
+	template <class DataType>
+	void put_timeout(Message* msg, unsigned long timeout) {
+		put<DataType>(msg, true, timeout);
+	};
+	template <class DataType>
+	void put_nowait(Message* msg) {
+		put<DataType>(msg, false, 0);
+	};
 	const std::vector<ID>& getLocalActorIDs(const std::string actor_type);
 	const std::vector<ID>& getGlobalActorIDs(const std::string actor_type);
 public :
@@ -536,27 +656,9 @@ public :
 		Poco::Net::StreamSocket socket(_server_address);
 		Poco::Net::SocketOutputStream socket_stream(socket);
 		while (true) {
-			Message* message = _get_queue->get();
-			// Serialize the message first so we know how large it is.
-			std::ostringstream archive_stream;
-			boost::archive::text_oarchive archive(archive_stream);
-			archive << (*message);
-			std::string message_str = archive_stream.str();
-			// Format the header.
-			std::ostringstream header_stream;
-			header_stream << std::setw(HEADER_LENGTH) << std::hex << message_str.size();
-			if (!header_stream || header_stream.str().size() != HEADER_LENGTH)
-				throw SocketWriterException("Error with HEADER_LENGTH");
-			std::string header_str = header_stream.str();
-			socket_stream << header_str << message_str;
-			if (message->isArchive()) {
-				// Assume the message._data was already serialized :
-				std::string* data_str = message->getDataString();
-				socket_stream << *data_str;
-				delete data_str;
-			};
-			socket_stream.flush();
-			delete message;
+			Message* msg = _get_queue->get();
+			msg->send(socket_stream);
+			delete msg;
 		};
 		// Add socket shutdown code here.
 	};
@@ -791,53 +893,16 @@ class SocketReader : public ThreadActor {
 	//       handle broken sockets
 protected :
 	Poco::Net::StreamSocket _stream_socket;
-	char _header_buffer[HEADER_LENGTH];
-	std::vector<char> _message_buffer;
-	std::vector<char> _data_buffer;
+	std::vector<char> _buffer;
 public :
 	SocketReader(Poco::Net::StreamSocket stream_socket, Connector* connector, ID id) :
 		ThreadActor(connector, id, NULL),
 		_stream_socket(stream_socket) {
 	};
 	void run () {
-		std::streamsize n;
 		while (true) {
-			n = _stream_socket.receiveBytes(_header_buffer, HEADER_LENGTH);
-			std::cout << "Reading Socket1 " << n << " " << _header_buffer << std::endl;
-			if (!(n>0))
-				throw SocketReaderException("ERROR reading header from socket");
-			// Determine the length of the serialized message:
-			std::istringstream is(std::string(_header_buffer, HEADER_LENGTH));
-			std::size_t message_size = 0;
-			if (!(is >> std::hex >> message_size))
-				throw SocketReaderException("INVALID header length");
-			// Read message of length message_size from socket :
-			_message_buffer.resize(message_size);
-			n = _stream_socket.receiveBytes(&_message_buffer[0], _message_buffer.size());
-			std::string archive_data(&_message_buffer[0], _message_buffer.size());
-			std::cout << "Reading Socket2 " << n << " " << archive_data << std::endl;
-			if (!(n>0))
-				throw SocketReaderException("ERROR reading message from socket");
-			// Unserialize message:
-			std::istringstream archive_stream(archive_data);
-			Message* message = new Message();
-			try {
-				boost::archive::text_iarchive archive(archive_stream);
-				archive >> (*message);
-			} catch (boost::archive::archive_exception& e) {
-				std::stringstream ss;
-				ss << "ERROR reading message archive : " << e.what();
-				throw SocketReaderException(ss.str());
-			}
-			if (message->isArchive()) {
-				// Read messagedata from socket:
-				_data_buffer.resize(message->getArchiveSize());
-				if (!(_stream_socket.receiveBytes(&_data_buffer[0], _data_buffer.size())>0))
-					throw SocketReaderException("ERROR reading data from socket");
-				std::string* data_str = new std::string(&_data_buffer[0], _data_buffer.size());
-				message->setData((void *)data_str);
-			}
-			put(message);
+			Message* msg = Message::receive(_stream_socket, _buffer);
+			put(msg);
 		};
 		// Add socket shutdown code here.
 	};

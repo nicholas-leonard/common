@@ -10,33 +10,24 @@
 
 void ProcessProxy::send(Message* message, bool block, int timeout) {};
 
-void Actor::put(Message* message, bool block, int timeout) {
-	// Get destination_process :
-	ID& destination_actor = message->getDestination();
-	hash_t actor_hash = destination_actor.getHash();
-	actor_iterator ai = _actor_map.find(actor_hash);
-	ID* destination_process;
-	if (ai == _actor_map.end()) {
-		destination_process = _connector->getProcessID(destination_actor);
-		_actor_map.insert(std::make_pair(actor_hash, destination_process));
-	} else
-		destination_process = ai->second;
-	// Message going out? Serialize :
-	if (destination_process->getHash() != _connector->getMyProcess().getHash())
-		serialize(message);
+bool Actor::outboundMessage(ID& process_id) {
+	return (process_id.getHash() != _connector->getMyProcess().getHash());
+};
+
+ProcessProxy& Actor::getProcessProxy(ID& process_id){
 	// Get process_proxy :
-	hash_t process_hash = destination_process->getHash();
+	hash_t process_hash = process_id.getHash();
 	process_iterator pi = _process_map.find(process_hash);
 	ProcessProxy* process_proxy;
 	if (pi == _process_map.end()) {
-		process_proxy = _connector->getProcessProxy(*destination_process);
+		process_proxy = _connector->getProcessProxy(process_id);
 		_process_map.insert(std::make_pair(process_hash, process_proxy));
 	} else
 		process_proxy = pi->second;
-	process_proxy->send(message, block, timeout);
+	return *process_proxy;
 };
 
-const ID& Actor::getProcessID(ID& actor_id) {
+ID& Actor::getProcessID(ID& actor_id) {
 	actor_iterator pi = _actor_map.find(actor_id.getHash());
 	if (pi == _actor_map.end()) {
 		ID* process_id = new ID(*_connector->getProcessID(actor_id));
